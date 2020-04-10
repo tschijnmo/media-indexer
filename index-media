@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+
+from os import path
+import abc
+import argparse
+import collections
+import datetime
+import os
+import os
+import re
+import shutil
+import urllib.parse
+
+import jinja2
+
+
+def main():
+    """The main function."""
+    parser = argparse.ArgumentParser(
+        description='Index media in the current directory.'
+    )
+    parser.add_argument(
+        '--prefix', '-p', metavar='NAME', default='',
+        help='A prefix for the names.'
+    )
+    args = parser.parse_args()
+
+    index_media(args.prefix)
+    return 0
+
+
+def index_media(prefix):
+    """The main driver."""
+    # An indexer will be called with all file names, and can generate an html
+    # snippet by the end.
+    indexers = [
+        VideoIndexer(),
+        PhotoIndexer(),
+    ]
+    traverse_files(indexers)
+    write_html(indexers, prefix)
+
+
+def traverse_files(indexers):
+    """Traverse the current working directory to get the media files."""
+    for root, _, files in os.walk('.'):
+        root = root[2:]
+        for name in files:
+            for indexer in indexers:
+                indexer(root, name)
+                continue
+            continue
+        continue
+    return
+
+
+MAIN_TEMPL = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ title }}</title>
+    <meta charset="UTF-8">
+</head>
+
+<body>
+    {%- for section in sections %}
+    {{ section }}
+    {%- endfor %}
+</body>
+</html>
+"""
+
+def write_html(indexers, prefix):
+    """Write the final HTML output file.
+
+    Note that the individual indexer could have side-effects on the cwd as
+    well.
+    """
+    env = jinja2.Environment()
+    sections = [i.gen_html(env, prefix) for i in indexers]
+
+    templ = env.from_string(MAIN_TEMPL)
+    res = templ.render(title=prefix + ' Media', sections=sections)
+
+    with open('index.html', 'w') as fp:
+        fp.write(res)
+    return
+
+
+class Indexer(abc.ABC):
+    """A abstract indexer class."""
+    @abc.abstractmethod
+    def __call__(self, root, name):
+        """Process the given file."""
+        pass
+
+    @abc.abstractmethod
+    def gen_html(self, env, prefix):
+        """Generates the HTML snippet for its section."""
+        pass
+
+
+#
+# Video indexing.
+#
+
+# Information about a video.
+Video = collections.namedtuple(
+    'Video', [
+        'name',
+        'url_name',
+        'date',
+        'size',
+    ]
+)
+
+VIDEO_TEMPL = """
+    <h1>{{ title }}</h1>
+    <table class="sortable">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Date</th>
+                <th>Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            {%- for videos in videos %}
+            <tr>
+                <td><a href="{{ videos.url_name }}?start=0">{{ videos.name }}</a></td>
+                <td>{{ videos.date }}</td>
+                <td>{{ videos.size }}</td>
+            </tr>
+            {%- endfor %}
+        </tbody>
+    </table>
+"""
+
+class VideoIndexer(Indexer):
+    """Indexer for videos.
+
+    Currently only mp4 files will be recognized as videos, and generates links
+    that's supposed to work with Nginx ngx_http_mp4_module module.
+    """
+
+    def __init__(self):
+        self.videos = []
+
+    def __call__(self, root, name):
+        p = os.path.join(root, name)
+        t = os.path.getctime(p)
+        d = datetime.datetime.utcfromtimestamp(t).date().isoformat()
+        gbs = os.path.getsize(p) / 1024 / 1024 / 1024
+        # Skip small files.
+        if gbs < 0.1:
+            return
+        s = '{:.3f}'.format(gbs)
+        self.videos.append(Video(p, urllib.parse.quote(p), d, s))
+
+    def gen_html(self, env, prefix):
+        videos = self.videos
+        videos.sort()
+        templ = env.from_string(VIDEO_TEMPL)
+        return templ.render(title=prefix + 'Tube', videos=videos)
+
+
+#
+# Photo Indexing.
+#
+
+
+PHOTO_RE = re.compile(r'.*\.(jpg|jpeg)', flags=re.I)
+PHOTO_OUT = 'mi-gen-photos'
+
+# Information about a photo bundle.
+PhotoBundle = collections.namedtuple(
+    'PhotoBundle', [
+        'name',
+        'url_name',
+        'n_photos',
+    ]
+)
+
+PHOTO_TEMPL = """
+    <h1>{{ title }}</h1>
+    <table class="sortable">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            {%- for bundle in bundles %}
+            <tr>
+                <td><a href="{{ bundle.url_name }}">{{ bundle.name }}</a></td>
+                <td>{{ bundle.n_photos }}</td>
+            </tr>
+            {%- endfor %}
+        </tbody>
+    </table>
+"""
+
+PHOTO_BUNDLE_TEMPL = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>{{ title }}</title>
+  <meta charset="UTF-8">
+  <meta http-equiv="x-ua-compatible" content="ie=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/foundation/6.6.3/css/foundation.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/motion-ui/2.0.3/motion-ui.min.css">
+  <style>
+  .orbit-previous .orbit-next {
+    font-size: 50em;
+  }
+  </style>
+</head>
+
+<body>
+<div class="orbit" role="region" aria-label="{{ title }}" data-orbit>
+  <div class="orbit-wrapper">
+    <div class="orbit-controls">
+      <button class="orbit-previous"><span class="show-for-sr">Previous Slide</span>&#9664;&#xFE0E;</button>
+      <button class="orbit-next"><span class="show-for-sr">Next Slide</span>&#9654;&#xFE0E;</button>
+    </div>
+
+    <ul class="orbit-container">
+      {%- for photo, link in photo_links %}
+      <li class="orbit-slide">
+        <figure class="orbit-figure">
+          <img class="orbit-image" src="{{ link }}" alt="{{ photo }}">
+          <figcaption class="orbit-caption">{{ photo }}</figcaption>
+        </figure>
+      </li>
+      {%- endfor %}
+    </ul>
+  </div>
+
+  <nav class="orbit-bullets">
+    {%- for photo, link in photo_links %}
+    <button data-slide="{{ loop.index0 }}"><span class="show-for-sr">{{ photo }}</span></button>
+    {%- endfor %}
+  </nav>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/what-input/5.2.7/what-input.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/foundation/6.6.3/js/foundation.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/motion-ui/2.0.3/motion-ui.min.js"></script>
+
+<script>
+$(document).foundation();
+</script>
+</body>
+</html>
+"""
+
+class PhotoIndexer(Indexer):
+    """Indexer for Photos."""
+
+    def __init__(self):
+        # From directory to photos in it.
+        self.photos = collections.defaultdict(list)
+
+    def __call__(self, path, name):
+        if not PHOTO_RE.match(name):
+            return
+        self.photos[path].append(name)
+
+
+    def gen_html(self, env, prefix):
+        shutil.rmtree(PHOTO_OUT, ignore_errors=True)
+        os.mkdir(PHOTO_OUT)
+
+        photos = self.photos
+        bundles = [
+            self._write_bundle(env, prefix, i, photos[i])
+            for i in sorted(photos.keys())
+        ]
+
+        templ = env.from_string(PHOTO_TEMPL)
+        return templ.render(title=prefix + "Ins", bundles=bundles)
+
+    def _write_bundle(self, env, prefix, bundle, photos):
+        """Writes the html file for a bundle, and return info about it."""
+        photo_links = [
+            (i, urllib.parse.quote(os.path.join('..', bundle, i)))
+            for i in sorted(photos)
+        ]
+
+        templ = env.from_string(PHOTO_BUNDLE_TEMPL)
+        content = templ.render(
+            title=''.join([prefix, 'Ins: ', bundle]),
+            photo_links=photo_links
+        )
+        bundle_filename = os.path.join(
+            PHOTO_OUT, bundle.replace(os.sep, '-') + '.html'
+        )
+        with open(bundle_filename, 'w') as fp:
+            fp.write(content)
+
+        return PhotoBundle(
+            name=bundle, url_name=urllib.parse.quote(bundle_filename),
+            n_photos=len(photos)
+        )
+
+
+if __name__ == '__main__':
+    main()
