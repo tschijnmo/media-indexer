@@ -5,6 +5,7 @@ import abc
 import argparse
 import collections
 import datetime
+import json
 import os
 import os
 import re
@@ -20,38 +21,30 @@ def main():
         description='Index media in the current directory.'
     )
     parser.add_argument(
-        '--prefix', '-p', metavar='NAME', default='',
-        help='A prefix for the names.'
+        'config', metavar='FILE', type=argparse.FileType('r'),
+        help='Json file for the config.'
     )
     args = parser.parse_args()
 
-    index_media(args.prefix)
+    index_media(args.config)
     return 0
 
 
-def index_media(prefix):
+def index_media(config):
     """The main driver."""
-    # An indexer will be called with all file names, and can generate an html
-    # snippet by the end.
-    indexers = [
-        VideoIndexer(),
-        PhotoIndexer(),
-    ]
-    traverse_files(indexers)
-    write_html(indexers, prefix)
+    indexers = []
 
-
-def traverse_files(indexers):
-    """Traverse the current working directory to get the media files."""
-    for root, _, files in os.walk('.'):
-        root = root[2:]
-        for name in files:
-            for indexer in indexers:
-                indexer(root, name)
-                continue
-            continue
+    sections = json.load(config)
+    for section in sections:
+        tp = section['type']
+        indexers.append(SUPPORTED_INDEXERS[tp](section))
         continue
-    return
+
+    for i in indexers:
+        i.traverse_files()
+        continue
+
+    write_html(indexers)
 
 
 MAIN_TEMPL = """
@@ -70,17 +63,17 @@ MAIN_TEMPL = """
 </html>
 """
 
-def write_html(indexers, prefix):
+def write_html(indexers):
     """Write the final HTML output file.
 
     Note that the individual indexer could have side-effects on the cwd as
     well.
     """
     env = jinja2.Environment()
-    sections = [i.gen_html(env, prefix) for i in indexers]
+    sections = [i.gen_html(env) for i in indexers]
 
     templ = env.from_string(MAIN_TEMPL)
-    res = templ.render(title=prefix + ' Media', sections=sections)
+    res = templ.render(title='Media', sections=sections)
 
     with open('index.html', 'w') as fp:
         fp.write(res)
@@ -88,16 +81,34 @@ def write_html(indexers, prefix):
 
 
 class Indexer(abc.ABC):
-    """A abstract indexer class."""
+    """A abstract indexer class.
+
+    By default, `path` and `title` options are supported and required.  All
+    paths should be relative to the current working dir.
+    """
+    def __init__(self, config):
+        self._path = config['path']
+        self._title = config['title']
+
     @abc.abstractmethod
     def __call__(self, root, name):
         """Process the given file."""
         pass
 
     @abc.abstractmethod
-    def gen_html(self, env, prefix):
+    def gen_html(self, env):
         """Generates the HTML snippet for its section."""
         pass
+
+    def traverse_files(self):
+        """Traverse the given path to get the media files."""
+        for root, _, files in os.walk(os.path.join('.', self._path)):
+            root = root[2:]
+            for name in files:
+                self(root, name)
+                continue
+            continue
+        return
 
 
 #
@@ -143,25 +154,32 @@ class VideoIndexer(Indexer):
     that's supposed to work with Nginx ngx_http_mp4_module module.
     """
 
-    def __init__(self):
+    VIDEO_RE = re.compile(r'.*\.mp4', flags=re.I)
+
+    def __init__(self, config):
+        super().__init__(config)
         self.videos = []
+        self.min_size = config['min-size'] if 'min-size' in config else None
 
     def __call__(self, root, name):
+        if not self.VIDEO_RE.match(name):
+            return
+
         p = os.path.join(root, name)
         t = os.path.getctime(p)
         d = datetime.datetime.utcfromtimestamp(t).date().isoformat()
         gbs = os.path.getsize(p) / 1024 / 1024 / 1024
         # Skip small files.
-        if gbs < 0.1:
+        if self.min_size and gbs < self.min_size:
             return
         s = '{:.3f}'.format(gbs)
         self.videos.append(Video(p, urllib.parse.quote(p), d, s))
 
-    def gen_html(self, env, prefix):
+    def gen_html(self, env):
         videos = self.videos
         videos.sort()
         templ = env.from_string(VIDEO_TEMPL)
-        return templ.render(title=prefix + 'Tube', videos=videos)
+        return templ.render(title=self._title, videos=videos)
 
 
 #
@@ -260,7 +278,8 @@ $(document).foundation();
 class PhotoIndexer(Indexer):
     """Indexer for Photos."""
 
-    def __init__(self):
+    def __init__(self, config):
+        super().__init__(config)
         # From directory to photos in it.
         self.photos = collections.defaultdict(list)
 
@@ -270,20 +289,20 @@ class PhotoIndexer(Indexer):
         self.photos[path].append(name)
 
 
-    def gen_html(self, env, prefix):
+    def gen_html(self, env):
         shutil.rmtree(PHOTO_OUT, ignore_errors=True)
         os.mkdir(PHOTO_OUT)
 
         photos = self.photos
         bundles = [
-            self._write_bundle(env, prefix, i, photos[i])
+            self._write_bundle(env, self._title, i, photos[i])
             for i in sorted(photos.keys())
         ]
 
         templ = env.from_string(PHOTO_TEMPL)
-        return templ.render(title=prefix + "Ins", bundles=bundles)
+        return templ.render(title=self._title, bundles=bundles)
 
-    def _write_bundle(self, env, prefix, bundle, photos):
+    def _write_bundle(self, env, title, bundle, photos):
         """Writes the html file for a bundle, and return info about it."""
         photo_links = [
             (i, urllib.parse.quote(os.path.join('..', bundle, i)))
@@ -292,7 +311,7 @@ class PhotoIndexer(Indexer):
 
         templ = env.from_string(PHOTO_BUNDLE_TEMPL)
         content = templ.render(
-            title=''.join([prefix, 'Ins: ', bundle]),
+            title=''.join([title, ': ', bundle]),
             photo_links=photo_links
         )
         bundle_filename = os.path.join(
@@ -305,6 +324,12 @@ class PhotoIndexer(Indexer):
             name=bundle, url_name=urllib.parse.quote(bundle_filename),
             n_photos=len(photos)
         )
+
+
+SUPPORTED_INDEXERS = {
+    'video': VideoIndexer,
+    'photo': PhotoIndexer,
+}
 
 
 if __name__ == '__main__':
