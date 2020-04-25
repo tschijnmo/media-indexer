@@ -326,9 +326,52 @@ class PhotoIndexer(Indexer):
         )
 
 
+#
+# Generic file indexing.
+#
+
+FILE_TEMPL = """
+    <h1>{{ title }}</h1>
+    <table class="sortable">
+        <thead>
+            <tr>
+                <th>Name</th>
+            </tr>
+        </thead>
+        <tbody>
+            {%- for file in files %}
+            <tr>
+                <td><a href="{{ file }}">{{ file }}</a></td>
+            </tr>
+            {%- endfor %}
+        </tbody>
+    </table>
+"""
+
+class FileIndexer(Indexer):
+    """Indexer for generic files to download.
+
+    TODO: This indexer offers much less features than the video indexer, like
+    non-ascii characters in the file names, size/date display.  Code needs to
+    be refactored to support these.
+    """
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.files = []
+
+    def __call__(self, path, name):
+        self.files.append(os.path.join(path, name))
+
+    def gen_html(self, env):
+        templ = env.from_string(FILE_TEMPL)
+        return templ.render(title=self._title, files=self.files)
+
+
 SUPPORTED_INDEXERS = {
     'video': VideoIndexer,
     'photo': PhotoIndexer,
+    'file': FileIndexer,
 }
 
 
